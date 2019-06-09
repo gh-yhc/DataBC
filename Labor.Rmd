@@ -1,0 +1,182 @@
+---
+title: "The National Agricultural Workers Survey (NAWS)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## NAWS data source
+The source of this **NAWS** data: <https://www.doleta.gov/naws/pages/public-data/public-data-codebook-and-questionnaire.cfm>
+
+```{r Load packages,include=FALSE}
+library(plyr)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(lubridate)
+```
+
+## Load and combine data by farm workers ID
+```{r Load and combine data by farm workers ID}
+laborA<- data.frame(read.csv("~/Downloads/NAWS_A2E185.csv"))
+laborB<- data.frame(read.csv("~/Downloads/NAWS_F2Y185.csv"))
+intersect(names(laborA),names(laborB))
+labor<-arrange( join(laborA,laborB) ,FWID)
+laborA<-NULL
+laborB<-NULL
+labor<-subset(labor,select=-c(FWID,B14CODE,B15CODE,NT02COD,NQ02COD,PESTCONT))
+labor<-labor[labor$FY==2015|2016,]
+```
+
+```{r Take a quick look at data,results='hide'}
+dim(labor)
+str(labor)
+names(labor)
+tail(labor,30)
+```
+
+### Preconditioning; convert the types of variables into factors
+```{r,results='hide'}
+nlev<-NULL
+for (ii in 1:ncol(labor)) {
+  nlev[ii]<-dim( table(labor[,ii]) )
+  if ( nlev[ii] <=11 ) { 
+    labor[,ii]<-factor( labor[,ii] )
+  }
+  else labor[,ii]<-as.numeric( labor[,ii] )
+}
+toFacNames<-c("Birth_State","B17","B18","B26a","B26b","B27a","B27b","G01","G02","A09","FY")
+for (jj in 1:length(toFacNames)) {
+  labor[,toFacNames[jj]]<-factor( labor[,toFacNames[jj]] )
+}
+```
+
+### Plots about wage 
+1. Wage as function of Age, 
+2. grouped by CROP
+```{r Make plots 1,warning=FALSE}
+qplot(AGE,D12WG4, data=labor,geom=c("point","smooth"),main="Wage as function of Age") # smooth:loess
+xyplot(D12WG4~AGE|CROP, data=labor,layout=c(6,1))
+```
+
+CROP: 0='NON-SASAGRICULTURE', 1='FIELD CROPS', 2='FRUITS&NUTS', 3='HORTICULTURE', 4='VEGETABLES', 5='MISC/MULT'
+
+3. grouped by D37A: How far is your current job from your current residence?
+( 1=I'm located at the job, 2=Within 9 miles, 3=10-24 miles, 
+4=25-49 miles, 5=50-74 miles, 6=75 miles or more )
+
+4. grouped by A21a: Does the farm worker have health insurance? ( 0=no, 1=yes, 7=don't know )
+
+or A21b: Does the spouse have health insurance? ( 0=no, 1=yes, 7=don't know )
+```{r Make plots 2,warning=FALSE}
+
+xyplot(D12WG4~AGE|D37A, data=labor,layout=c(6,1))
+#qplot(AGE,D12WG4, data=labor,color=D37A)
+
+xyplot(D12WG4~AGE|A21a, data=labor,layout=c(6,1))
+
+qplot(D12WG4,data=labor,geom="density",color=A21a)
+```
+
+Check whether the farm worker and their spouses have health insurance:
+A21a: Does the farm worker have health insurance? ( 0=no, 1=yes, 7=don't know )
+A21b: Does the spouse have health insurance? ( 0=no, 1=yes, 7=don't know )
+```{r}
+qplot(A21a,data=labor,fill=A21b)
+```
+
+## Hypothesis testing for paired categorical variables
+NP1F: In the last 12 months, have you loaded, mixed or applied pesticides?
+```{r Hypothesis testing, warning=FALSE}
+co<-NULL
+labor$NP01f<-as.factor(labor$NP01f)
+
+for (ii in 1:ncol(labor)) {
+  laborT<-as.data.frame(labor$NP01f)
+  
+  if ( dim(table(labor[,ii]))<=11 ) { 
+  
+    laborT[,2]<-labor[,ii]
+    laborT[,2]<-as.factor( laborT[,2] )
+    names(laborT)[2]<-names(labor)[ii]
+    #print(names(labor)[ii])
+    bad<-rowSums( is.na(laborT) | laborT=="" )>0
+    laborT<-laborT[!bad,]
+    
+    chisqRes<-chisq.test(table(laborT))
+    co[ii]<-chisqRes$p.value
+    #if (co[ii]>0.05){print(names(labor)[ii])}
+  }
+}
+plot(co)
+print(names(labor)[!is.na(co) & co<0.05])
+#plot(co,ylim=c(0,1))
+```
+
+## Training with Random Forest
+Here we select group B variables (Adult Education, Languages, Work Experience, Residence) to make models, predictions, confusion matrices
+
+```{r Training with Random Forest, group B variables: Adult Education, Languages, Work Experience, Residence}
+labor %>% filter(FY==2016) %>% select( grep("^B0",names(labor)),NP01f) ->laborC
+
+for (ii in 1:ncol(laborC)) {
+  bad<-rowSums( is.na(laborC) | laborC=="" )>0
+  laborC<-laborC[!bad,]
+}
+
+inTrain <- createDataPartition(y=laborC$NP01f, p=0.7, list=FALSE)
+training <- laborC[inTrain, ]
+testing <- laborC[-inTrain, ]
+dim(training)
+dim(testing)
+
+table(training$NP01f,useNA="ifany")
+
+ptm <- proc.time()
+modRF<-train(NP01f~.,data=training,method="rf",ntree=10,tuneGrid=data.frame(mtry=6))
+proc.time()-ptm
+
+predRF<-predict(modRF,testing)
+confusionMatrix(predRF,testing$NP01f)
+plot(modRF$finalModel$importance)
+modRF$finalModel$importance
+```
+B17: [IF FOREIGN BORN:] In what country (outside of the U.S.A.) did you live before coming to the U.S.A?
+
+Here we select group G variables (Income and Assets) to make models, predictions, confusion matrices.
+
+```{r Training with Random Forest, group G variables: Income and Assets}
+labor %>% filter(FY==2016) %>% select( grep("^G0",names(labor)),NP01f) ->laborC
+
+for (ii in 1:ncol(laborC)) {
+  bad<-rowSums( is.na(laborC) | laborC=="" )>0
+  laborC<-laborC[!bad,]
+}
+
+inTrain <- createDataPartition(y=laborC$NP01f, p=0.7, list=FALSE)
+training <- laborC[inTrain, ]
+testing <- laborC[-inTrain, ]
+dim(training)
+dim(testing)
+
+table(training$NP01f,useNA="ifany")
+
+ptm <- proc.time()
+modRF<-train(NP01f~.,data=training,method="rf",ntree=10,tuneGrid=data.frame(mtry=6))
+proc.time()-ptm
+
+predRF<-predict(modRF,testing)
+confusionMatrix(predRF,testing$NP01f)
+plot(modRF$finalModel$importance)
+modRF$finalModel$importance
+```
+
+G3: What was your FAMILY'S TOTAL INCOME last year in U.S.A. dollars (U.S.A. earners only)?
+
+```{r}
+
+```
+
